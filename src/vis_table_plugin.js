@@ -257,18 +257,17 @@ class VisPluginTableModel {
 
     this.checkVarianceCalculations()
     if (this.useIndexColumn) { this.addIndexColumn(queryResponse) }
-    if (this.hasSubtotals) { this.checkSubtotalsData(queryResponse) }
-
+    
     this.addRows(lookerData)
     this.addColumnSeries()
 
     if (this.hasTotals) { this.buildTotals(queryResponse) }
     if (this.spanRows) { this.setRowSpans() }
+    if (this.hasSubtotals) { this.checkSubtotalsData(queryResponse) }
     if (this.addRowSubtotals) { this.addSubTotals() }
     if (this.addColSubtotals && this.pivot_fields.length === 2) { this.addColumnSubTotals() }
     if (this.variances) { this.addVarianceColumns() }
 
-    // this.addColumnSeries()    // TODO: add column series for generated columns (eg column subtotals)
     this.sortColumns()
     this.columns.forEach(column => column.setHeaderCellLabels())
     if (this.spanCols) { this.setColSpans() }
