@@ -1315,7 +1315,6 @@ class VisPluginTableModel {
       })
     }
     this.hasSubtotals = true
-    console.log('enrichSubtotalRows() final this', this)
   }
 
   enrichSubtotalRows () {
@@ -1379,15 +1378,28 @@ class VisPluginTableModel {
    *   original row
    */
   updateDataSortValues () {
+    console.log('updateDataSortValues() data table:', this)
     let subtotalSorts = []
-    for (let i = 0; i < this.dimensions.length - 1; i++) {
-      subtotalSorts.push({
-        type: this.config.sortRowSubtotalsBy === 'dimension' ? 'subtotalDimension' : 'subtotalMeasure',
-        depth: i,
-        name: this.dimensions[i].name,
-        desc: false
-      })
+    if (this.config.sortRowSubtotalsBy === 'dimension') {
+      for (let i = 0; i < this.dimensions.length - 1; i++) {
+        subtotalSorts.push({
+          type: 'subtotalDimension', //'subtotalMeasure'
+          depth: i,
+          name: this.dimensions[i].name,
+          desc: false
+        })
+      }
+    } else {
+      for (let i = 0; i < this.dimensions.length - 1; i++) {
+        subtotalSorts.push({
+          type: 'subtotalMeasure',
+          depth: i,
+          name: this.measures[0].name,
+          desc: true
+        })
+      }
     }
+    
 
     rowSortOrder = [
       {
@@ -1417,8 +1429,8 @@ class VisPluginTableModel {
           case 'total':
             row.collapsibleSort.push(row.type === 'total' ? 1 : 0)
             break
+
           case 'subtotalDimension':
-          case 'subtotalMeasure':
             if (row.type === 'subtotal') {
               let value = this.subtotalGroups[row.id].values[sort.depth]
               if (typeof value === 'undefined') {
@@ -1430,13 +1442,41 @@ class VisPluginTableModel {
               row.collapsibleSort.push(row.data[sort.name].value)
             }
             break
+
+          case 'subtotalMeasure':
+            if (row.type !== 'total') {
+              let group = ['CollapsibleSubtotal']
+              let depth = Math.min(typeof row.depth === 'undefined' ?  this.dimensions.length - 1 : row.depth, sort.depth)
+
+              if (sort.depth <= depth) {
+                for (let i = 0; i <= depth; i++) {
+                  if (row.type === 'subtotal') {
+                    group.push(this.subtotalGroups[row.id].values[i])
+                  } else {
+                    group.push(row.data[this.dimensions[i].name].value)
+                  }
+                }
+                let groupId = group.join('|')
+                let value = this.subtotalGroups[groupId].row.data[sort.name].value 
+                row.collapsibleSort.push(value)
+              } else {
+                row.collapsibleSort.push(Number.NEGATIVE_INFINITY)
+              }
+            } else {
+              row.collapsibleSort.push(0)
+            }
+            break
+
           case 'subtotalLast':
+            // let subtotalValue = this.config.sortRowSubtotalsBy === 'dimension' ? 1 : -1
             row.collapsibleSort.push(row.type === 'subtotal' ? 1 : 0)
             break
+
           case 'dimension':
           case 'measure':
             row.collapsibleSort.push(row.data[sort.name].value)
             break
+
           case 'originalRow':
             row.collapsibleSort.push(row.originalRow)
             break
