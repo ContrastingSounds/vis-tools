@@ -186,6 +186,9 @@ const tableModelCoreOptions = {
     order: 100,
   },
 }
+
+let rowSortOrder = []
+
 /**
  * Represents an "enriched data object" with additional methods and properties for data vis
  * Takes the data, config and queryResponse objects as inputs to the constructor
@@ -203,6 +206,8 @@ class VisPluginTableModel {
    * @param {*} config 
    */
   constructor(lookerData, queryResponse, config) {
+    rowSortOrder = []
+
     this.visId = 'report_table'
     this.config = config
 
@@ -230,9 +235,12 @@ class VisPluginTableModel {
     this.useViewName = config.useViewName || false
     this.addRowSubtotals = config.rowSubtotals || false
     this.addSubtotalDepth = parseInt(config.subtotalDepth)|| this.dimensions.length - 1
+    this.subtotalGroups = []
     this.addColSubtotals = config.colSubtotals || false
     this.spanRows = false || config.spanRows
     this.spanCols = false || config.spanCols
+    this.useInitialRowSort = true
+    this.originalRowSorts = queryResponse.sorts
     this.sortColsBy = config.sortColumnsBy || 'pivots' // matches to Column methods: pivots(), measures)
     this.fieldLevel = 0 // set in addPivotsAndHeaders()
     this.groupVarianceColumns = config.groupVarianceColumns || false
@@ -262,6 +270,9 @@ class VisPluginTableModel {
     this.addColumnSeries()
 
     if (this.hasTotals) { this.buildTotals(queryResponse) }
+    if (this.addRowSubtotals) { this.initialSort() }
+    if (this.addRowSubtotals) { this.calculateSubtotalRows(queryResponse) }
+    if (this.addRowSubtotals) { this.enrichSubtotalRows() }
     if (this.spanRows) { this.setRowSpans() }
     if (this.hasSubtotals) { this.checkSubtotalsData(queryResponse) }
     if (this.addRowSubtotals) { this.addSubTotals() }
@@ -809,53 +820,6 @@ class VisPluginTableModel {
   }
 
   /**
-   * this.subtotals_data
-   * @param {*} queryResponse 
-   */
-  checkSubtotalsData(queryResponse) {
-    if (typeof queryResponse.subtotals_data[this.addSubtotalDepth] !== 'undefined') {
-      queryResponse.subtotals_data[this.addSubtotalDepth].forEach(lookerSubtotal => {
-        var visSubtotal = new Row('subtotal')
-
-        visSubtotal['$$$__grouping__$$$'] = lookerSubtotal['$$$__grouping__$$$']
-        var groups = ['Subtotal']
-        visSubtotal['$$$__grouping__$$$'].forEach(group => {
-          groups.push(lookerSubtotal[group].value)
-        })
-        visSubtotal.id = groups.join('|')
-
-        this.columns.forEach(column => {
-          visSubtotal.data[column.id] = (column.pivoted || column.isRowTotal) ? lookerSubtotal[column.modelField.name][column.pivot_key] : lookerSubtotal[column.id]
-          var cell = visSubtotal.data[column.id]
-
-          if (typeof cell !== 'undefined') {
-            if (typeof cell.cell_style === 'undefined') {
-              cell.cell_style = ['total', 'subtotal']
-            } else {
-              cell.cell_style = cell.cell_style.concat(['total', 'subtotal'])
-            }
-            if (typeof column.modelField.style !== 'undefined') {
-              cell.cell_style = cell.cell_style.concat(column.modelField.style)
-            }
-            if (cell.value === null) {
-              cell.rendered = ''
-            }
-
-            var reportInSetting = this.config['reportIn|' + column.modelField.name]
-            if (typeof reportInSetting !== 'undefined' && reportInSetting !== '1') {
-              var unit = this.config.useUnit && column.modelField.unit !== '#' ? column.modelField.unit : ''
-              cell.html = null
-              cell.value = Math.round(cell.value / parseInt(reportInSetting))
-              cell.rendered = column.modelField.value_format === '' ? cell.value.toString() : unit + SSF.format(column.modelField.value_format, cell.value)
-            }
-          }            
-        })
-        this.subtotals_data[visSubtotal.id] = visSubtotal
-      })
-    }
-  }
-
-  /**
    * Populates this.data with Rows of data
    * @param {*} lookerData 
    */
@@ -863,6 +827,7 @@ class VisPluginTableModel {
     lookerData.forEach((lookerRow, i) => {
       var row = new Row('line_item')
       row.id = this.dimensions.map(dimension => lookerRow[dimension.name].value).join('|')
+      row.originalRow = i
 
       this.columns.forEach(column => {
         var cellValue = (column.pivoted || column.isRowTotal)? lookerRow[column.modelField.name][column.pivot_key] : lookerRow[column.id]
@@ -1038,6 +1003,7 @@ class VisPluginTableModel {
       }
     }
     totalsRow.sort = [1, 0, 0]
+    totalsRow.originalRow = Number.POSITIVE_INFINITY
     this.data.push(totalsRow)
 
     // Including an Others row: note the huge assumption in calculating a very simple average!
@@ -1101,10 +1067,242 @@ class VisPluginTableModel {
         }
       }
       othersRow.sort = [1, -1, -1] 
+      othersRow.originalRow = 999999
       this.data.push(othersRow)
     }
     
     this.sortData()
+  }
+
+  /**
+   * Sorts data rows to ensure subtotal groupings are correct
+   * Creates Rows for each subtotal group
+   * Adds children (subtotals and line_items) to each Row
+   */
+  initialSort() {
+    this.originalRowSorts.forEach(sort => {
+      if (this.measures.map(measure => measure.name).includes(sort.name)) {
+        sort.type = 'measure'
+      } else {
+        sort.type = 'dimension'
+      }
+    })
+
+    let subtotalSorts = []
+    for (let i = 0; i < this.dimensions.length - 1; i++) {
+      subtotalSorts.push({
+        type: 'dimension',
+        name: this.dimensions[i].name,
+        desc: false
+      })
+    }
+
+    rowSortOrder = [
+      {
+        type: 'total',
+        name: 'total',
+        desc: false
+      },
+      ...subtotalSorts,
+      {
+        type: 'originalRow',
+        name: 'originalRow',
+        desc: false
+      }
+    ]
+    
+    this.updateCollapsibleSortValues()
+    this.collapsibleSortData()
+    // this.data.forEach(row => console.log(row.collapsibleSort))
+
+
+    // BUILD STRUCTURE OF ALL SUBTOTALS
+    this.subtotalGroups = {}
+    let latestGroups = [...subtotalSorts.map(sub => [])]
+    this.data.forEach(row => {
+      subtotalSorts.forEach((subDimension, depth) => {
+        if (row.type !== 'total') {
+          let group = []
+          for (let g = 0; g < depth + 1; g++) {
+            group.push(row.data[subtotalSorts[g].name].value)
+          }
+          let subtotalId = ['CollapsibleSubtotal', ...group].join('|')
+          if (subtotalId !== latestGroups[depth].id) {
+            let visSubtotal = new Row('subtotal')
+            visSubtotal.id = subtotalId
+            visSubtotal.children = []
+            // this.data.push(visSubtotal)
+
+            let newSubtotalGroup = {
+              depth: depth,
+              id: subtotalId,
+              values: group,
+              row: visSubtotal 
+            }
+            this.subtotalGroups[subtotalId] = newSubtotalGroup
+            latestGroups[depth] = newSubtotalGroup
+            if (depth > 0) {
+              latestGroups[depth - 1].row.children.push(visSubtotal)
+            }
+          }
+        }
+      })
+      if (row.type !== 'total') {
+        latestGroups[subtotalSorts.length - 1].row.children.push(row)
+      }
+    })
+  }
+
+  /**
+   * enriches subtotal Rows with aggregated data
+   * uses subtotals_data from queryResponse
+   * checks for missing data (either because subtotals weren't available in queryResponse at all, or inidivudal missing rows)
+   *   - calculated subtotals where missing
+   */
+  calculateSubtotalRows(queryResponse) {
+    let subtotalSorts = rowSortOrder.filter(sort => sort.type === 'dimension')
+    if (typeof queryResponse.subtotals_data !== 'undefined') {
+      for (const [key, subtotals_array] of Object.entries(queryResponse.subtotals_data)) {
+        subtotals_array.forEach(subtotals_entry => {
+          let group = []
+          subtotalSorts.forEach(dimension => {
+            if (!(subtotals_entry[dimension.name].value === null && subtotals_entry[dimension.name].filterable_value === "EMPTY")) {
+              group.push(subtotals_entry[dimension.name].value)
+            }
+          })
+          let groupId = ['CollapsibleSubtotal', ...group].join('|')
+          for (const [field, cell] of Object.entries(subtotals_entry)) {
+            this.subtotalGroups[groupId].row.data[field] = new DataCell(cell)
+          }
+        })
+      }
+    }
+
+    for (const [key, subtotalGroup] of Object.entries(this.subtotalGroups)) {
+      let missingGroups = []
+      if (typeof subtotalGroup.row.data.$$$__grouping__$$$ === 'undefined') {
+        console.log('subtotalGroup missing in queryResponse.subtotals_data:', key)
+        missingGroups.push(subtotalGroup)
+      }
+
+      missingGroups.forEach(missingGroup => {
+        this.dimensions.forEach((dimension, i) => {
+          if (typeof missingGroup.values[i] !== 'undefined') {
+            missingGroup.row.data[dimension.name] = new DataCell({ 
+              value: missingGroup.values[i],
+              cell_style: ["total", "subtotal"]
+            })
+          } else {
+            missingGroup.row.data[dimension.name] = new DataCell({
+              value: null,
+              rendered: "",
+              filterable_value: "EMPTY",
+              cell_style: ["total", "subtotal"]
+            })
+          }
+        })
+
+        this.columns.filter(column => column.modelField.type === 'measure').forEach(column => {
+          var subtotal_value = 0
+          var subtotal_items = 0
+          var rendered = ''
+
+          this.data.forEach(row => {
+            if (row.type === 'line_item') {
+              let match = true
+              missingGroup.values.forEach((value, i) => {
+                if (row.data[subtotalSorts[i].name].value !== value) {
+                  match = false
+                }
+              })
+              if (match) {
+                let value = row.data[column.id].value
+                if (Number.isFinite(value)) {
+                  subtotal_value += value
+                  subtotal_items++
+                }
+              }
+            }
+          })
+
+          if (column.modelField.calculation_type === 'average' && subtotal_items > 0) {
+            subtotal_value = subtotal_value / subtotal_items
+          }
+          if (subtotal_value) {
+            var unit = this.config.useUnit && column.modelField.unit !== '#'  ? column.modelField.unit : ''
+            rendered = column.modelField.value_format === '' ? subtotal_value.toString() : unit + SSF.format(column.modelField.value_format, subtotal_value)
+          }
+          if (column.modelField.calculation_type === 'string') {
+            subtotal_value = ''
+            rendered = ''
+          } 
+
+          var cell = new DataCell({
+            value: subtotal_value,
+            rendered: rendered,
+            cell_style: ["total", "subtotal"]
+          })
+          missingGroup.row.data[column.id] = cell          
+        })
+      })
+    }
+    console.log('enrichSubtotalRows() final this', this)
+  }
+
+  // Some combination of:
+  //    update rowSortValues object
+  //    loop through table.subtotalGroups and update subtotal values for sort. Do this directly via a new function? 
+  //    loop through data and update row values for sort
+  //    iterate through the table.subtotalGroups tree to update all data rows with the right sort data
+  enrichSubtotalRows () {
+    for (const [key, subtotalGroup] of Object.entries(this.subtotalGroups)) {
+      subtotalGroup.row.data['$$$_index_$$$'] = new DataCell({})
+      this.columns.forEach(column => {
+        // console.log('column:', column.id, 'subtotalGroup column:', subtotalGroup.row.data[column.id] )
+        let cell = subtotalGroup.row.data[column.id]
+        cell.colid = column.id
+        cell.rowid = subtotalGroup.id
+        cell.id = [cell.colid, cell.rowid].join('|')
+
+        if (column.modelField.type === 'dimension') {
+          if ([this.firstVisibleDimension, '$$$_index_$$$'].includes(column.id)) {
+            cell.rowspan = 1
+            cell.colspan = this.useIndexColumn ? 1 : this.dimensions.filter(d => !d.hide).length
+          } else {
+            cell.rowspan = -1
+            cell.colspan = -1
+          }
+
+          if (column.modelField.is_numeric) {
+            cell.align = 'right'
+            cell.cell_style.concat(['numeric', 'dimension'])
+          } else {
+            cell.align = 'left'
+            cell.cell_style.concat(['nonNumeric', 'dimension'])
+          }
+          
+          if (column.id === '$$$_index_$$$' || column.id === this.firstVisibleDimension ) {
+            if (this.genericLabelForSubtotals) {
+              cell.value = 'Subtotal'
+              cell.rendered = 'Subtotal'
+            } else {
+              cell.value = subtotalGroup.values.join(' | ') ? subtotalGroup.values.join(' | ') : 'Others'
+              cell.rendered = cell.value
+            }
+          }
+        }
+
+        if (column.modelField.type === 'measure') {
+          if (column.modelField.is_numeric) {
+            cell.align = 'right'
+            cell.cell_style.concat(['numeric', 'measure'])
+          } else {
+            cell.align = 'left'
+            cell.cell_style.concat(['nonNumeric', 'measure'])
+          }
+        }
+      })
+    }
   }
 
   /**
@@ -1170,6 +1368,53 @@ class VisPluginTableModel {
   }
 
   /**
+   * this.subtotals_data
+   * @param {*} queryResponse 
+   */
+  checkSubtotalsData(queryResponse) {
+    if (typeof queryResponse.subtotals_data[this.addSubtotalDepth] !== 'undefined') {
+      queryResponse.subtotals_data[this.addSubtotalDepth].forEach(lookerSubtotal => {
+        var visSubtotal = new Row('subtotal')
+
+        visSubtotal['$$$__grouping__$$$'] = lookerSubtotal['$$$__grouping__$$$']
+        var groups = ['Subtotal']
+        visSubtotal['$$$__grouping__$$$'].forEach(group => {
+          groups.push(lookerSubtotal[group].value)
+        })
+        visSubtotal.id = groups.join('|')
+
+        this.columns.forEach(column => {
+          visSubtotal.data[column.id] = (column.pivoted || column.isRowTotal) ? lookerSubtotal[column.modelField.name][column.pivot_key] : lookerSubtotal[column.id]
+          var cell = visSubtotal.data[column.id]
+
+          if (typeof cell !== 'undefined') {
+            if (typeof cell.cell_style === 'undefined') {
+              cell.cell_style = ['total', 'subtotal']
+            } else {
+              cell.cell_style = cell.cell_style.concat(['total', 'subtotal'])
+            }
+            if (typeof column.modelField.style !== 'undefined') {
+              cell.cell_style = cell.cell_style.concat(column.modelField.style)
+            }
+            if (cell.value === null) {
+              cell.rendered = ''
+            }
+
+            var reportInSetting = this.config['reportIn|' + column.modelField.name]
+            if (typeof reportInSetting !== 'undefined' && reportInSetting !== '1') {
+              var unit = this.config.useUnit && column.modelField.unit !== '#' ? column.modelField.unit : ''
+              cell.html = null
+              cell.value = Math.round(cell.value / parseInt(reportInSetting))
+              cell.rendered = column.modelField.value_format === '' ? cell.value.toString() : unit + SSF.format(column.modelField.value_format, cell.value)
+            }
+          }            
+        })
+        this.subtotals_data[visSubtotal.id] = visSubtotal
+      })
+    }
+  }
+
+  /**
    * Generates subtotals values
    * 
    * 1. Build array of subtotal groups
@@ -1194,7 +1439,7 @@ class VisPluginTableModel {
     var subTotalGroups = []
     var latest_group = []
     this.data.forEach((row, i) => {    
-      if (row.type !== 'total') {
+      if (row.type !== 'total' && row.type !== 'subtotal') {
         var group = []
         for (var g = 0; g < depth; g++) {
           var dim = this.dimensions[g].name
@@ -1645,16 +1890,68 @@ class VisPluginTableModel {
     }
     return -1
   }
+
+  compareCollapsibleSortArrays (a, b) {
+    var depth = Math.max(a.collapsibleSort.length, b.collapsibleSort.length)
+    for(var i = 0; i < depth; i++) {
+        var a_value = typeof a.collapsibleSort[i] !== 'undefined' ? a.collapsibleSort[i] : 0
+        var b_value = typeof b.collapsibleSort[i] !== 'undefined' ? b.collapsibleSort[i] : 0
+        if (rowSortOrder[i].desc === false) {
+          if (a_value > b_value) { return 1 }
+          if (a_value < b_value) { return -1 }
+        } else {
+          if (a_value < b_value) { return 1 }
+          if (a_value > b_value) { return -1 } 
+        }
+    }
+    return -1
+  }
+
+  /**
+   * Updates the values used for sorting rows
+   * 
+   * Sort factors: 
+   *    section (total, subtotal group, line item)
+   *    field list
+   *    original order
+   *
+   */
+  updateCollapsibleSortValues () {
+    // rowSortOrder will break later. Needs to consistently include totals, originalRow, etc.
+    // add a new 'type' property to the sort object?
+    // - if so, then update the creation of the original this.defaultRowSort from queryResponse.sorts
+
+    console.log('updateCollapsibleSortValues() rowSortOrder:', rowSortOrder)
+
+    this.data.forEach(row => {
+      row.collapsibleSort = []
+      rowSortOrder.forEach(sort => {
+        switch (sort.type) {
+          case 'dimension':
+          case 'measure':
+            row.collapsibleSort.push(row.data[sort.name].value)
+            break
+          case 'total':
+            row.collapsibleSort.push(row.type === 'total' ? Number.POSITIVE_INFINITY : 0)
+            break
+          case 'originalRow':
+            row.collapsibleSort.push(row.originalRow)
+            break
+        }
+      })
+    })
+  }
+
   /**
    * Sorts the rows of data, then updates vertical cell merge 
-   * 
-   * Rows are sorted by three values:
-   * 1. Section
-   * 2. Subtotal Group
-   * 3. Row Value (currently based only on original row index from the Looker data object)
    */
   sortData () {
     this.data.sort(this.compareSortArrays)
+    if (this.spanRows) { this.setRowSpans() }
+  }
+
+  collapsibleSortData () {
+    this.data.sort(this.compareCollapsibleSortArrays)
     if (this.spanRows) { this.setRowSpans() }
   }
 
@@ -1979,7 +2276,6 @@ class VisPluginTableModel {
     return measure
   }
 
-
   /**
    * Extracts the formatted value of the field from the html: value
    * There are cases (totals data) where the formatted value isn't available as usual rendered_value
@@ -2108,7 +2404,6 @@ class VisPluginTableModel {
     })
     return raw_values
   }
-
 
   /**
    * Builds array of arrays, used at by table vis to build column groups
