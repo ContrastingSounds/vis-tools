@@ -228,7 +228,7 @@ class VisPluginTableModel {
     this.measures = []
     this.columns = []
     this.data = []
-    this.subtotals_data = {}
+    // this.subtotals_data = {}
 
     this.transposed_headers = []
     this.transposed_columns = []
@@ -252,7 +252,7 @@ class VisPluginTableModel {
     this.spanRows = false || config.spanRows
     this.spanCols = false || config.spanCols
     this.useInitialRowSort = true
-    this.originalRowSorts = queryResponse.sorts
+    this.originalRowSorts = queryResponse.sorts.filter(sort => queryResponse.fields.dimension_like.map(dimension => dimension.name).includes(sort.name))
     this.sortColsBy = config.sortColumnsBy || 'pivots' // matches to Column methods: pivots(), measures)
     this.fieldLevel = 0 // set in addPivotsAndHeaders()
     this.groupVarianceColumns = config.groupVarianceColumns || false
@@ -272,7 +272,7 @@ class VisPluginTableModel {
 
     var col_idx = 0
     this.addPivotsAndHeaders(queryResponse)
-    this.addDimensions(queryResponse, col_idx)
+    this.addDimensions(queryResponse, col_idx, lookerData)
     this.addMeasures(queryResponse, col_idx)
 
     this.checkVarianceCalculations()
@@ -283,10 +283,10 @@ class VisPluginTableModel {
 
     if (this.hasTotals) { this.buildTotals(queryResponse) }
     if (this.addRowSubtotals) { 
-      this.initialSort()
-      this.calculateSubtotalRows(queryResponse)
+      this.sortRowsAndInitialiseSubtotals()
+      this.calculateSubtotalValues(queryResponse)
       this.enrichSubtotalRows()
-      this.updateDataSortValues()
+      this.updateRowSortValues()
       this.collapsibleSortData()
     }
     if (this.spanRows) { this.setRowSpans() }
@@ -1088,37 +1088,6 @@ class VisPluginTableModel {
     this.sortData()
   }
 
-    /**
-   * Updates the values used for sorting rows
-   * 
-   * Sort factors: 
-   *    section (total, subtotal group, line item)
-   *    field list
-   *    original order
-   *
-   */
-  updateCollapsibleSortValues () {
-    console.log('updateCollapsibleSortValues() rowSortOrder:', rowSortOrder)
-
-    this.data.forEach(row => {
-      row.collapsibleSort = []
-      rowSortOrder.forEach(sort => {
-        switch (sort.type) {
-          case 'dimension':
-          case 'measure':
-            row.collapsibleSort.push(row.data[sort.name].value)
-            break
-          case 'total':
-            row.collapsibleSort.push(row.type === 'total' ? Number.POSITIVE_INFINITY : 0)
-            break
-          case 'originalRow':
-            row.collapsibleSort.push(row.originalRow)
-            break
-        }
-      })
-    })
-  }
-
   compareCollapsibleSortArrays (a, b) {
     var depth = Math.max(a.collapsibleSort.length, b.collapsibleSort.length)
     for(var i = 0; i < depth; i++) {
@@ -1142,10 +1111,10 @@ class VisPluginTableModel {
 
   /**
    * Sorts data rows to ensure subtotal groupings are correct
-   * Creates Rows for each subtotal group
+   * Simultaneously creates Rows in this.data and subtotalGroups in this.subtotalGroups
    * Adds children (subtotals and line_items) to each Row
    */
-  initialSort() {
+  sortRowsAndInitialiseSubtotals() {
     this.originalRowSorts.forEach(sort => {
       if (this.measures.map(measure => measure.name).includes(sort.name)) {
         sort.type = 'measure'
@@ -1177,7 +1146,29 @@ class VisPluginTableModel {
       }
     ]
     
-    this.updateCollapsibleSortValues()
+    console.log('sortRowsAndInitialiseSubtotals() rowSortOrder:', rowSortOrder)
+
+    this.data.forEach(row => {
+      row.collapsibleSort = []
+      rowSortOrder.forEach(sort => {
+        switch (sort.type) {
+          case 'dimension':
+            let value = typeof row.data[sort.name].sort_value !== 'undefined' ? row.data[sort.name].sort_value : row.data[sort.name].value
+            row.collapsibleSort.push(value)
+            break
+          case 'measure':
+            row.collapsibleSort.push(row.data[sort.name].value)
+            break
+          case 'total':
+            row.collapsibleSort.push(row.type === 'total' ? Number.POSITIVE_INFINITY : 0)
+            break
+          case 'originalRow':
+            row.collapsibleSort.push(row.originalRow)
+            break
+        }
+      })
+    })
+
     this.collapsibleSortData()
 
     // BUILD STRUCTURE OF ALL SUBTOTALS
@@ -1187,8 +1178,11 @@ class VisPluginTableModel {
       subtotalSorts.forEach((subDimension, depth) => {
         if (row.type !== 'total') {
           let group = []
+          let sort_values = []
           for (let g = 0; g < depth + 1; g++) {
-            group.push(row.data[subtotalSorts[g].name].value)
+            let cell = row.data[subtotalSorts[g].name]
+            group.push(cell.value)
+            sort_values.push(typeof cell.sort_value !== 'undefined' ? cell.sort_value : cell.value)
           }
           let subtotalId = ['CollapsibleSubtotal', ...group].join('|')
           if (subtotalId !== latestGroups[depth].id) {
@@ -1196,13 +1190,13 @@ class VisPluginTableModel {
             visSubtotal.id = subtotalId
             visSubtotal.depth = depth
             visSubtotal.children = []
-            this.data.push(visSubtotal)
 
             let newSubtotalGroup = {
               depth: depth,
               id: subtotalId,
               values: group,
-              row: visSubtotal 
+              sort_values: sort_values,
+              row: visSubtotal
             }
             this.subtotalGroups[subtotalId] = newSubtotalGroup
             latestGroups[depth] = newSubtotalGroup
@@ -1219,12 +1213,12 @@ class VisPluginTableModel {
   }
 
   /**
-   * calculates subtotal Rows with aggregated data
-   * uses subtotals_data from queryResponse
-   * checks for missing data (either because subtotals weren't available in queryResponse at all, or inidivudal missing rows)
+   * Populates subtotal Rows with aggregate data
+   * If available, uses queryResponse.subtotals_data
+   * Checks for missing data (either because subtotals weren't available in queryResponse at all, or inidivudal missing rows)
    *   - calculated subtotals where missing
    */
-  calculateSubtotalRows(queryResponse) {
+  calculateSubtotalValues(queryResponse) {
     let subtotalSorts = rowSortOrder.filter(sort => sort.type === 'dimension')
     if (typeof queryResponse.subtotals_data !== 'undefined') {
       for (const [key, subtotals_array] of Object.entries(queryResponse.subtotals_data)) {
@@ -1317,9 +1311,12 @@ class VisPluginTableModel {
     this.hasSubtotals = true
   }
 
+  /**
+   * 
+   */
   enrichSubtotalRows () {
     for (const [key, subtotalGroup] of Object.entries(this.subtotalGroups)) {
-      subtotalGroup.row.data['$$$_index_$$$'] = new DataCell({})
+      subtotalGroup.row.data['$$$_index_$$$'] = new DataCell({ cell_style: ["total", "subtotal"] })
       this.columns.forEach(column => {
         // console.log('column:', column.id, 'subtotalGroup column:', subtotalGroup.row.data[column.id] )
         let cell = subtotalGroup.row.data[column.id]
@@ -1329,6 +1326,7 @@ class VisPluginTableModel {
 
         if (column.modelField.type === 'dimension') {
           if ([this.firstVisibleDimension, '$$$_index_$$$'].includes(column.id)) {
+            cell.html = null
             cell.rowspan = 1
             cell.colspan = this.useIndexColumn ? 1 : this.dimensions.filter(d => !d.hide).length
           } else {
@@ -1365,6 +1363,8 @@ class VisPluginTableModel {
           }
         }
       })
+
+      this.data.push(subtotalGroup.row)
     }
   }
  
@@ -1377,13 +1377,13 @@ class VisPluginTableModel {
    *   row level sorts
    *   original row
    */
-  updateDataSortValues () {
-    console.log('updateDataSortValues() data table:', this)
+  updateRowSortValues () {
+    console.log('updateRowSortValues() data table:', this)
     let subtotalSorts = []
     if (this.config.sortRowSubtotalsBy === 'dimension') {
       for (let i = 0; i < this.dimensions.length - 1; i++) {
         subtotalSorts.push({
-          type: 'subtotalDimension', //'subtotalMeasure'
+          type: 'subtotalDimension',
           depth: i,
           name: this.dimensions[i].name,
           desc: false
@@ -1420,7 +1420,7 @@ class VisPluginTableModel {
         desc: false
       }
     ]
-    console.log('updateDataSortValues() rowSortOrder:', rowSortOrder)
+    console.log('updateRowSortValues() rowSortOrder:', rowSortOrder)
 
     this.data.forEach(row => {
       row.collapsibleSort = []
@@ -1436,10 +1436,11 @@ class VisPluginTableModel {
               if (typeof value === 'undefined') {
                 row.collapsibleSort.push('ZZZZZZZZZ')
               } else {
-                row.collapsibleSort.push(value)
+                // Check if there is a sort_value available. If not, use value from subtotalGroup.values, because the first subtotal dimension has a concatenated value
+                row.collapsibleSort.push(typeof row.data[sort.name].sort_value !== 'undefined' ? row.data[sort.name].sort_value : value)
               }
             } else {
-              row.collapsibleSort.push(row.data[sort.name].value)
+              row.collapsibleSort.push(typeof row.data[sort.name].sort_value !== 'undefined' ? row.data[sort.name].sort_value : row.data[sort.name].value)
             }
             break
 
@@ -1468,11 +1469,13 @@ class VisPluginTableModel {
             break
 
           case 'subtotalLast':
-            // let subtotalValue = this.config.sortRowSubtotalsBy === 'dimension' ? 1 : -1
             row.collapsibleSort.push(row.type === 'subtotal' ? 1 : 0)
             break
 
           case 'dimension':
+            row.collapsibleSort.push(typeof row.data[sort.name].sort_value !== 'undefined' ? row.data[sort.name].sort_value : row.data[sort.name].value)
+            break
+
           case 'measure':
             row.collapsibleSort.push(row.data[sort.name].value)
             break
